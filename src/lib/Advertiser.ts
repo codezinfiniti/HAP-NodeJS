@@ -1,9 +1,44 @@
+import ciao, {
+  CiaoService,
+  MDNSServerOptions,
+  Responder,
+  ServiceEvent,
+  ServiceTxt,
+  ServiceType
+} from "@homebridge/ciao";
+import assert from "assert";
 import crypto from 'crypto';
-
-import bonjour, { BonjourHap, MulticastOptions, Service } from 'bonjour-hap';
-
-import { Nullable } from '../types';
+import { EventEmitter } from "events";
 import { AccessoryInfo } from './model/AccessoryInfo';
+
+/**
+ * This enum lists all bitmasks for all known status flags.
+ * When the bit for the given bitmask is set, it represents the state described by the name.
+ */
+export const enum StatusFlag {
+  NOT_PAIRED = 0x01,
+  NOT_JOINED_WIFI = 0x02,
+  PROBLEM_DETECTED = 0x04,
+}
+
+/**
+ * This enum lists all bitmasks for all known pairing feature flags.
+ * When the bit for the given bitmask is set, it represents the state described by the name.
+ */
+export const enum PairingFeatureFlag {
+  SUPPORTS_HARDWARE_AUTHENTICATION = 0x01,
+  SUPPORTS_SOFTWARE_AUTHENTICATION = 0x02,
+}
+
+export const enum AdvertiserEvent {
+  UPDATED_NAME = "updated-name",
+}
+
+export declare interface Advertiser {
+  on(event: "updated-name", listener: (name: string) => void): this;
+
+  emit(event: "updated-name", name: string): boolean;
+}
 
 /**
  * Advertiser uses mdns to broadcast the presence of an Accessory to the local network.
@@ -13,105 +48,98 @@ import { AccessoryInfo } from './model/AccessoryInfo';
  * To support this requirement, we provide the ability to be "discoverable" or not (via a "service flag" on the
  * mdns payload).
  */
-export class Advertiser {
+export class Advertiser extends EventEmitter {
 
   static protocolVersion: string = "1.1";
   static protocolVersionService: string = "1.1.0";
 
-  _bonjourService: BonjourHap;
-  _advertisement: Nullable<Service>;
-  _setupHash: string;
+  private readonly accessoryInfo: AccessoryInfo;
+  private readonly responder: Responder;
+  private readonly setupHash: string;
 
-  constructor(public accessoryInfo: AccessoryInfo, mdnsConfig: MulticastOptions) {
-    this._bonjourService = bonjour(mdnsConfig);
-    this._advertisement = null;
-    this._setupHash = this._computeSetupHash();
+  private advertisedService?: CiaoService;
+
+  constructor(accessoryInfo: AccessoryInfo, options?: MDNSServerOptions) {
+    super();
+    this.accessoryInfo = accessoryInfo;
+    this.responder = ciao.getResponder(options);
+    this.setupHash = this.computeSetupHash();
   }
 
-  startAdvertising = (port: number) => {
+  public initAdvertiser(port: number): void {
+    assert(!this.advertisedService, "Service was already created!");
 
-    // stop advertising if necessary
-    if (this._advertisement) {
-      this.stopAdvertising();
-    }
-
-    var txtRecord = {
-      md: this.accessoryInfo.displayName,
-      pv: Advertiser.protocolVersion,
-      id: this.accessoryInfo.username,
-      "c#": this.accessoryInfo.configVersion + "", // "accessory conf" - represents the "configuration version" of an Accessory. Increasing this "version number" signals iOS devices to re-fetch /accessories data.
-      "s#": "1", // "accessory state"
-      "ff": "0",
-      "ci": this.accessoryInfo.category as unknown as string,
-      "sf": this.accessoryInfo.paired() ? "0" : "1", // "sf == 1" means "discoverable by HomeKit iOS clients"
-      "sh": this._setupHash
-    };
-
-    /**
-     * The host name of the component is probably better to be
-     * the username of the hosted accessory + '.local'.
-     * By default 'bonjour' doesnt add '.local' at the end of the os.hostname
-     * this causes to return 'raspberrypi' on raspberry pi / raspbian
-     * then when the phone queryies for A/AAAA record it is being queried
-     * on normal dns, not on mdns. By Adding the username of the accessory
-     * probably the problem will also fix a possible problem
-     * of having multiple pi's on same network
-     */
-    var host = this.accessoryInfo.username.replace(/\:/ig, "_") + '.local';
-    var advertiseName = this.accessoryInfo.displayName
-      + " "
-      + crypto.createHash('sha512').update(this.accessoryInfo.username, 'utf8').digest('hex').slice(0, 4).toUpperCase();
-
-    // create/recreate our advertisement
-    this._advertisement = this._bonjourService.publish({
-      name: advertiseName,
-      type: "hap",
+    this.advertisedService = this.responder.createService({
+      name: this.accessoryInfo.displayName,
+      type: ServiceType.HAP,
       port: port,
-      txt: txtRecord,
-      host: host
+      txt: this.createTxt(),
+      // host will default now to <displayName>.local, spaces replaced with dashes
     });
+    this.advertisedService.on(ServiceEvent.NAME_CHANGED, this.emit.bind(this, AdvertiserEvent.UPDATED_NAME));
   }
 
-  isAdvertising = () => {
-    return (this._advertisement != null);
+  public startAdvertising(): Promise<void> {
+    assert(this.advertisedService, "Cannot create advertisement when the service wasn't created yet!");
+    return this.advertisedService!.advertise();
   }
 
-  updateAdvertisement = () => {
-    if (this._advertisement) {
+  public isServiceCreated(): boolean {
+    return !!this.advertisedService;
+  }
 
-      var txtRecord = {
-        md: this.accessoryInfo.displayName,
-        pv: Advertiser.protocolVersion,
-        id: this.accessoryInfo.username,
-        "c#": this.accessoryInfo.configVersion + "", // "accessory conf" - represents the "configuration version" of an Accessory. Increasing this "version number" signals iOS devices to re-fetch /accessories data.
-        "s#": "1", // "accessory state"
-        "ff": "0",
-        "ci": `${this.accessoryInfo.category}`,
-        "sf": this.accessoryInfo.paired() ? "0" : "1", // "sf == 1" means "discoverable by HomeKit iOS clients"
-        "sh": this._setupHash
-      };
+  public updateAdvertisement(): void {
+    assert(this.advertisedService, "Cannot update advertisement when service wasn't yet advertised!");
+    this.advertisedService!.updateTxt(this.createTxt());
+  }
 
-      this._advertisement.updateTxt(txtRecord);
+  public stopAdvertising(): Promise<void> {
+    assert(this.advertisedService, "Cannot stop advertisement when service wasn't yet advertised!");
+    return this.advertisedService!.end();
+  }
+
+  public async shutdown(): Promise<void> {
+    await this.stopAdvertising(); // would also be done by the shutdown method below
+    await this.responder.shutdown();
+  }
+
+  private createTxt(): ServiceTxt {
+    const statusFlags: StatusFlag[] = [];
+
+    if (!this.accessoryInfo.paired()) {
+      statusFlags.push(StatusFlag.NOT_PAIRED);
     }
+
+    return {
+      "c#": this.accessoryInfo.getConfigVersion(), // current configuration number
+      ff: Advertiser.ff(), // pairing feature flags
+      id: this.accessoryInfo.username, // device id
+      md: this.accessoryInfo.model, // model name
+      pv: Advertiser.protocolVersion, // protocol version
+      "s#": 1, // current state number (must be 1)
+      sf: Advertiser.sf(...statusFlags), // status flags
+      ci: this.accessoryInfo.category,
+      sh: this.setupHash,
+    };
   }
 
-  stopAdvertising = () => {
-    if (this._advertisement) {
-      this._advertisement.stop();
-      this._advertisement.destroy();
-      this._advertisement = null;
-    }
-
-    this._bonjourService.destroy();
+  private computeSetupHash(): string {
+    const hash = crypto.createHash('sha512');
+    hash.update(this.accessoryInfo.setupID + this.accessoryInfo.username.toUpperCase());
+    return hash.digest().slice(0, 4).toString('base64');
   }
 
-  _computeSetupHash = () => {
-    var setupHashMaterial = this.accessoryInfo.setupID + this.accessoryInfo.username;
-    var hash = crypto.createHash('sha512');
-    hash.update(setupHashMaterial);
-    var setupHash = hash.digest().slice(0, 4).toString('base64');
-
-    return setupHash;
+  public static ff(...flags: PairingFeatureFlag[]): number {
+    let value = 0;
+    flags.forEach(flag => value |= flag);
+    return value;
   }
+
+  public static sf(...flags: StatusFlag[]): number {
+    let value = 0;
+    flags.forEach(flag => value |= flag);
+    return value;
+  }
+
 }
 

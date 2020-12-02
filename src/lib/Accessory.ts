@@ -1,11 +1,13 @@
+import { MDNSServerOptions } from "@homebridge/ciao";
 import crypto from 'crypto';
 import createDebug from 'debug';
+import assert from "assert";
 
 import * as uuid from './util/uuid';
 import { clone } from './util/clone';
 import { SerializedService, Service, ServiceConfigurationChange, ServiceEventTypes, ServiceId } from './Service';
 import { Access, Characteristic, CharacteristicEventTypes, CharacteristicSetCallback, Perms } from './Characteristic';
-import { Advertiser } from './Advertiser';
+import { Advertiser, AdvertiserEvent } from './Advertiser';
 import { CharacteristicsWriteRequest, Codes, HAPServer, HAPServerEventTypes, Status } from './HAPServer';
 import { AccessoryInfo, PairingInformation, PermissionTypes } from './model/AccessoryInfo';
 import { IdentifierCache } from './model/IdentifierCache';
@@ -46,6 +48,7 @@ const MAX_SERVICES = 100;
 
 // Known category values. Category is a hint to iOS clients about what "type" of Accessory this represents, for UI only.
 export const enum Categories {
+  // noinspection JSUnusedGlobalSymbols
   OTHER = 1,
   BRIDGE = 2,
   FAN = 3,
@@ -82,6 +85,8 @@ export const enum Categories {
   TARGET_CONTROLLER = 32, // Remote Control
   ROUTER = 33,
   AUDIO_RECEIVER = 34,
+  TV_SET_TOP_BOX = 35,
+  TV_STREAMING_STICK = 36,
 }
 
 export interface SerializedAccessory {
@@ -139,7 +144,7 @@ export interface PublishInfo {
   category?: Categories;
   setupID?: string;
   port?: number;
-  mdns?: any;
+  mdns?: MDNSServerOptions;
 }
 
 export type ServiceCharacteristicChange = CharacteristicChange &  {
@@ -227,9 +232,9 @@ export class Accessory extends EventEmitter<Events> {
 
   constructor(public displayName: string, public UUID: string) {
     super();
-    if (!displayName) throw new Error("Accessories must be created with a non-empty displayName.");
-    if (!UUID) throw new Error("Accessories must be created with a valid UUID.");
-    if (!uuid.isValid(UUID)) throw new Error("UUID '" + UUID + "' is not a valid UUID. Try using the provided 'generateUUID' function to create a valid UUID from any arbitrary string, like a serial number.");
+    assert(displayName, "Accessories must be created with a non-empty displayName.");
+    assert(UUID, "Accessories must be created with a valid UUID.")
+    assert(uuid.isValid(UUID), "UUID '" + UUID + "' is not a valid UUID. Try using the provided 'generateUUID' function to create a valid UUID from any arbitrary string, like a serial number.");
 
     // create our initial "Accessory Information" Service that all Accessories are expected to have
     this.addService(Service.AccessoryInformation)
@@ -723,7 +728,7 @@ export class Accessory extends EventEmitter<Events> {
    * mistakes in Accessory structured, which may lead to HomeKit rejecting the accessory when pairing.
    * If it is called on a bridge it will call this method for all bridged accessories.
    */
-  private validateAccessory() {
+  private validateAccessory(mainAccessory?: boolean) {
     const service = this.getService(Service.AccessoryInformation);
     if (!service) {
       console.log("HAP-NodeJS WARNING: The accessory '" + this.displayName + "' is getting published without a AccessoryInformation service. " +
@@ -748,6 +753,11 @@ export class Accessory extends EventEmitter<Events> {
       checkValue("SerialNumber", serialNumber);
       checkValue("FirmwareRevision", firmwareRevision);
       checkValue("Name", name);
+    }
+
+    if (mainAccessory) {
+      // the main accessory which is advertised via bonjour must have a name with length <= 63 (limitation of DNS FQDN names)
+      assert(Buffer.from(this.displayName, "utf8").length <= 63, "Accessory displayName cannot be longer than 63 bytes!");
     }
 
     if (this.bridged) {
@@ -872,9 +882,9 @@ export class Accessory extends EventEmitter<Events> {
    *                                new Accessory.
    */
   publish = (info: PublishInfo, allowInsecureRequest?: boolean) => {
-    let service: Service | undefined;
+    // TODO maybe directly enqueue the method call on nextTick (could solve most out of order constructions)
 
-    service = this.getService(Service.ProtocolInformation);
+    let service = this.getService(Service.ProtocolInformation);
     if (!service) {
       service = this.addService(Service.ProtocolInformation) // add the protocol information service to the primary accessory
     }
@@ -883,6 +893,12 @@ export class Accessory extends EventEmitter<Events> {
     if (this.lastKnownUsername && this.lastKnownUsername !== info.username) { // username changed since last publish
       Accessory.cleanupAccessoryData(this.lastKnownUsername); // delete old Accessory data
     }
+
+    // adding some identifying material to our displayName
+    this.displayName = this.displayName + " " + crypto.createHash('sha512')
+      .update(info.username, 'utf8')
+      .digest('hex').slice(0, 4).toUpperCase();
+    this.getService(Service.AccessoryInformation)!.updateCharacteristic(Characteristic.Name, this.displayName);
 
     // attempt to load existing AccessoryInfo from disk
     this._accessoryInfo = AccessoryInfo.load(info.username);
@@ -905,6 +921,7 @@ export class Accessory extends EventEmitter<Events> {
 
     // make sure we have up-to-date values in AccessoryInfo, then save it in case they changed (or if we just created it)
     this._accessoryInfo.displayName = this.displayName;
+    this._accessoryInfo.model = this.getService(Service.AccessoryInformation)!.getCharacteristic(Characteristic.Model).value as string;
     this._accessoryInfo.category = info.category || Categories.OTHER;
     this._accessoryInfo.pincode = info.pincode;
     this._accessoryInfo.save();
@@ -945,15 +962,24 @@ export class Accessory extends EventEmitter<Events> {
     if (configHash !== this._accessoryInfo.configHash) {
 
       // our configuration has changed! we'll need to bump our config version number
-      this._accessoryInfo.configVersion++;
-      this._accessoryInfo.configHash = configHash;
-      this._accessoryInfo.save();
+      this._accessoryInfo.updateConfigHash(configHash);
     }
 
-    this.validateAccessory();
+    this.validateAccessory(true);
 
     // create our Advertiser which broadcasts our presence over mdns
     this._advertiser = new Advertiser(this._accessoryInfo, info.mdns);
+    this._advertiser.on(AdvertiserEvent.UPDATED_NAME, name => {
+      this.displayName = name;
+      if (this._accessoryInfo) {
+        this._accessoryInfo.displayName = name;
+        this._accessoryInfo.save();
+      }
+
+      // bonjour service name MUST match the name in the accessory information service
+      this.getService(Service.AccessoryInformation)!
+        .updateCharacteristic(Characteristic.Name, name);
+    });
 
     // create our HAP server which handles all communication between iOS devices and us
     this._server = new HAPServer(this._accessoryInfo);
@@ -970,8 +996,7 @@ export class Accessory extends EventEmitter<Events> {
     this._server.on(HAPServerEventTypes.SESSION_CLOSE, this._handleSessionClose.bind(this));
     this._server.on(HAPServerEventTypes.REQUEST_RESOURCE, this._handleResource.bind(this));
 
-    const targetPort = info.port || 0;
-    this._server.listen(targetPort);
+    this._server.listen(info.port || 0);
   }
 
   /**
@@ -997,13 +1022,13 @@ export class Accessory extends EventEmitter<Events> {
       this._server = undefined;
     }
     if (this._advertiser) {
-      this._advertiser.stopAdvertising();
+      this._advertiser.shutdown();
       this._advertiser = undefined;
     }
   }
 
   _updateConfiguration = () => {
-    if (this._advertiser && this._advertiser.isAdvertising()) {
+    if (this._advertiser && this._advertiser.isServiceCreated()) {
       // get our accessory information in HAP format and determine if our configuration (that is, our
       // Accessories/Services/Characteristics) has changed since the last time we were published. make
       // sure to omit actual values since these are not part of the "configuration".
@@ -1017,9 +1042,7 @@ export class Accessory extends EventEmitter<Events> {
       if (this._accessoryInfo && configHash !== this._accessoryInfo.configHash) {
 
         // our configuration has changed! we'll need to bump our config version number
-        this._accessoryInfo.configVersion++;
-        this._accessoryInfo.configHash = configHash;
-        this._accessoryInfo.save();
+        this._accessoryInfo.updateConfigHash(configHash);
       }
 
       // update our advertisement so HomeKit on iOS can pickup new accessory
@@ -1028,15 +1051,16 @@ export class Accessory extends EventEmitter<Events> {
   }
 
   _onListening = (port: number) => {
+    assert(this._advertiser, "Advertiser wasn't created at onListening!");
     // the HAP server is listening, so we can now start advertising our presence.
-    this._advertiser && this._advertiser.startAdvertising(port);
+    this._advertiser!.initAdvertiser(port);
+    this._advertiser!.startAdvertising();
     this.emit(AccessoryEventTypes.LISTENING, port);
   }
 
 // Called when an unpaired client wishes for us to identify ourself
   _handleIdentify = (callback: IdentifyCallback) => {
-    var paired = false;
-    this._identificationRequest(paired, callback);
+    this._identificationRequest(false, callback);
   }
 
 // Called when HAPServer has completed the pairing process with a client
@@ -1098,12 +1122,12 @@ export class Accessory extends EventEmitter<Events> {
     this._accessoryInfo.removePairedClient(controller, username);
     this._accessoryInfo.save();
 
+    callback(0); // first of all ensure the pairing is removed before we advertise availability again
+
     if (!this._accessoryInfo.paired()) {
       this._advertiser && this._advertiser.updateAdvertisement();
       this.emit(AccessoryEventTypes.UNPAIRED);
     }
-
-    callback(0);
   };
 
   _handleListPairings = (controller: Session, callback: ListPairingsCallback) => {
@@ -1149,7 +1173,7 @@ export class Accessory extends EventEmitter<Events> {
       var characteristic = this.findCharacteristic(characteristicData.aid, characteristicData.iid);
 
       if (!characteristic) {
-        debug('[%s] Could not find a Characteristic with iid of %s and aid of %s', this.displayName, characteristicData.aid, characteristicData.iid);
+        debug('[%s] Could not find a Characteristic with aid of %s and iid of %s', this.displayName, characteristicData.aid, characteristicData.iid);
         var response: any = {
           aid: aid,
           iid: iid

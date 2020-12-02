@@ -28,19 +28,21 @@ export class AccessoryInfo {
 
   username: MacAddress;
   displayName: string;
+  model: string; // this property is currently not saved to disk
   category: Categories;
   pincode: string;
   signSk: Buffer;
   signPk: Buffer;
   pairedClients: Record<string, PairingInformation>;
   pairedAdminClients: number;
-  configVersion: number;
+  private configVersion: number = 1;
   configHash: string;
   setupID: string;
 
   private constructor(username: MacAddress) {
     this.username = username;
     this.displayName = "";
+    this.model = "";
     // @ts-ignore
     this.category = "";
     this.pincode = "";
@@ -48,7 +50,6 @@ export class AccessoryInfo {
     this.signPk = Buffer.alloc(0);
     this.pairedClients = {};
     this.pairedAdminClients = 0;
-    this.configVersion = 1;
     this.configHash = "";
 
     this.setupID = "";
@@ -149,6 +150,27 @@ export class AccessoryInfo {
     return Object.keys(this.pairedClients).length > 0; // if we have any paired clients, we're paired.
   }
 
+  public updateConfigHash(hash: string): void {
+    this.configVersion++;
+    this.ensureConfigVersionBounds();
+
+    this.configHash = hash;
+    this.save();
+  }
+
+  public getConfigVersion(): number {
+    return this.configVersion;
+  }
+
+  private ensureConfigVersionBounds(): void {
+    // current configuration number must be in the range of 1-65535 and wrap to 1 when it overflows
+
+    this.configVersion = this.configVersion % (0xFFFF + 1);
+    if (this.configVersion === 0) {
+      this.configVersion = 1;
+    }
+  }
+
   save = () => {
     var saved = {
       displayName: this.displayName,
@@ -231,6 +253,8 @@ export class AccessoryInfo {
       info.configHash = saved.configHash || "";
 
       info.setupID = saved.setupID || "";
+
+      info.ensureConfigVersionBounds();
 
       return info;
     }

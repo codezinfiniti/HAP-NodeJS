@@ -370,6 +370,33 @@ export class Characteristic extends EventEmitter<Events> {
   static SupportedTransferTransportConfiguration: typeof HomeKitTypes.Generated.SupportedTransferTransportConfiguration;
   static SetupTransferTransport: typeof HomeKitTypes.Generated.SetupTransferTransport;
 
+
+  static ActivityInterval: typeof HomeKitTypes.Generated.ActivityInterval;
+  static CCAEnergyDetectThreshold: typeof HomeKitTypes.Generated.CCAEnergyDetectThreshold;
+  static CCASignalDetectThreshold: typeof HomeKitTypes.Generated.CCASignalDetectThreshold;
+  static CharacteristicValueTransitionControl: typeof HomeKitTypes.Generated.CharacteristicValueTransitionControl;
+  static SupportedCharacteristicValueTransitionConfiguration: typeof HomeKitTypes.Generated.SupportedCharacteristicValueTransitionConfiguration;
+  static CurrentTransport: typeof HomeKitTypes.Generated.CurrentTransport;
+  static DataStreamHAPTransport: typeof HomeKitTypes.Generated.DataStreamHAPTransport;
+  static DataStreamHAPTransportInterrupt: typeof HomeKitTypes.Generated.DataStreamHAPTransportInterrupt;
+  static EventRetransmissionMaximum: typeof HomeKitTypes.Generated.EventRetransmissionMaximum;
+  static EventTransmissionCounters: typeof HomeKitTypes.Generated.EventTransmissionCounters;
+  static HeartBeat: typeof HomeKitTypes.Generated.HeartBeat;
+  static MACRetransmissionMaximum: typeof HomeKitTypes.Generated.MACRetransmissionMaximum;
+  static MACTransmissionCounters: typeof HomeKitTypes.Generated.MACTransmissionCounters;
+  static OperatingStateResponse: typeof HomeKitTypes.Generated.OperatingStateResponse;
+  static Ping: typeof HomeKitTypes.Generated.Ping;
+  static ReceiverSensitivity: typeof HomeKitTypes.Generated.ReceiverSensitivity;
+  static ReceivedSignalStrengthIndication: typeof HomeKitTypes.Generated.ReceivedSignalStrengthIndication;
+  static SleepInterval: typeof HomeKitTypes.Generated.SleepInterval;
+  static SignalToNoiseRatio: typeof HomeKitTypes.Generated.SignalToNoiseRatio;
+  static SupportedDiagnosticsSnapshot: typeof HomeKitTypes.Generated.SupportedDiagnosticsSnapshot;
+  static TransmitPower: typeof HomeKitTypes.Generated.TransmitPower;
+  static TransmitPowerMaximum: typeof HomeKitTypes.Generated.TransmitPowerMaximum;
+  static VideoAnalysisActive: typeof HomeKitTypes.Generated.VideoAnalysisActive;
+  static WiFiCapabilities: typeof HomeKitTypes.Generated.WiFiCapabilities;
+  static WiFiConfigurationControl: typeof HomeKitTypes.Generated.WiFiConfigurationControl;
+
   // NOTICE: when adding/changing properties, remember to possibly adjust the serialize/deserialize functions
   iid: Nullable<number> = null;
   value: Nullable<CharacteristicValue> = null;
